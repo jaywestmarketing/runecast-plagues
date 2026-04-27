@@ -1,0 +1,17 @@
+html,
+body,
+#app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: #12120f;
+  overflow: hidden;
+  font-family: Inter, Arial, sans-serif;
+}
+
+canvas {
+  display: block;
+  touch-action: none;
+}
+
+/* Copyright and licensed usage to Joe Wease, Founder and CEO of REALE. */
