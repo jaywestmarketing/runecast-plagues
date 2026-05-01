@@ -42,6 +42,7 @@ const WORLD_SIZE = 4600;
 const PLAYER_SPEED = 160;
 
 class MainScene extends Phaser.Scene {
+  private readonly isMobile = /Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(navigator.userAgent);
   private player!: Phaser.GameObjects.Rectangle;
   private playerDirection = new Phaser.Math.Vector2(1, 0);
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -123,8 +124,11 @@ class MainScene extends Phaser.Scene {
   private createHud(): void {
     this.hudText = this.add.text(16, 14, '', { color: '#f4f1ca', fontSize: '15px' }).setScrollFactor(0);
     this.waveText = this.add.text(16, 38, 'Wave: 0', { color: '#d2f0ff', fontSize: '14px' }).setScrollFactor(0);
+    const controlHint = this.isMobile
+      ? 'Mobile mode: drag joystick + tap near hero to place towers.'
+      : 'Desktop mode: WASD steer + click near hero to place towers.';
     this.hintText = this.add
-      .text(16, 62, 'Place tower: tap/click nearby (wood 40, stone 30). Safe zones = upgrades.', {
+      .text(16, 62, `${controlHint} Safe zones = upgrades.`, {
         color: '#fff2b2',
         fontSize: '13px'
       })
@@ -153,6 +157,11 @@ class MainScene extends Phaser.Scene {
   private createJoystick(): void {
     this.mobileStickBase = this.add.circle(88, 370, 44, 0x202734, 0.45).setScrollFactor(0).setDepth(20);
     this.mobileStickKnob = this.add.circle(88, 370, 18, 0x8ec8ff, 0.82).setScrollFactor(0).setDepth(21);
+    if (!this.isMobile) {
+      this.mobileStickBase.setVisible(false);
+      this.mobileStickKnob.setVisible(false);
+      return;
+    }
 
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
       if (!pointer.isDown) return;
@@ -176,7 +185,7 @@ class MainScene extends Phaser.Scene {
     if (this.keys.A.isDown) input.x -= 1;
     if (this.keys.D.isDown) input.x += 1;
     if (input.lengthSq() > 0) this.playerDirection.copy(input.normalize());
-    else if (this.joystickVector.lengthSq() > 0.03) this.playerDirection.copy(this.joystickVector.clone().normalize());
+    else if (this.isMobile && this.joystickVector.lengthSq() > 0.03) this.playerDirection.copy(this.joystickVector.clone().normalize());
 
     const next = this.playerDirection.clone().scale(PLAYER_SPEED * dt);
     const nx = Phaser.Math.Clamp(this.player.x + next.x, 10, WORLD_SIZE - 10);
@@ -340,6 +349,9 @@ class MainScene extends Phaser.Scene {
   private openMenu(): void {
     this.pausedByMenu = true;
     this.menuContainer.setVisible(true);
+    if (this.isMobile) {
+      this.hintText.setText('Mobile menu: use number keys if keyboard attached, or ESC/back to exit.');
+    }
   }
 
   private closeMenu(): void {
@@ -425,7 +437,7 @@ const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'app',
   backgroundColor: '#1e221a',
-  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: 800, height: 450 },
+  scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 800, height: 450 },
   scene: [MainScene]
 };
 

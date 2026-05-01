@@ -8,6 +8,7 @@ A browser-first prototype inspired by medieval survival/base-defense games, desi
 - Vite
 
 ## What improved in this version
+- Auto-detects mobile vs desktop and presents controls accordingly.
 - Stronger wave variety with enemy archetypes (raider, runner, brute).
 - Towers now auto-fire at nearby enemies.
 - Safe zones are time-limited events, not permanent circles.
@@ -22,8 +23,8 @@ A browser-first prototype inspired by medieval survival/base-defense games, desi
 - Run ends when the keep is destroyed.
 
 ## Controls
-- **WASD**: steer the always-moving character.
-- **Pointer drag (mobile)**: virtual joystick control.
+- **Desktop**: WASD to steer, click/tap near hero to place towers.
+- **Mobile**: virtual joystick appears automatically for touch steering.
 - **1**: repair keep in refuge menu.
 - **2**: upgrade keep in refuge menu.
 - **3**: build barracks in refuge menu.
