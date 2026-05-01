@@ -1,9 +1,13 @@
 import Phaser from 'phaser';
 import './style.css';
 
-type ResourceState = { wood: number; stone: number; food: number; gold: number };
-type BuildingKind = 'keep' | 'house' | 'tower' | 'workshop';
-type ViewMode = 'third' | 'first';
+type ResourceState = {
+  wood: number;
+  stone: number;
+  food: number;
+};
+
+type BuildingKind = 'keep' | 'farm' | 'tower' | 'barracks';
 
 type BuildingModel = {
   id: string;
@@ -12,194 +16,250 @@ type BuildingModel = {
   hp: number;
   maxHp: number;
   level: number;
+  repairCost: number;
   generationRate: Partial<ResourceState>;
-  attackLevel: number;
-  defenseLevel: number;
-  underAttackUntil: number;
 };
 
-type EnemyModel = { sprite: Phaser.GameObjects.Rectangle; hp: number; speed: number; damage: number };
+type SafeZone = {
+  id: string;
+  x: number;
+  y: number;
+  radius: number;
+  circle: Phaser.GameObjects.Arc;
+};
 
-const WORLD_SIZE = 9000;
-const PLAYER_SPEED = 175;
+const WORLD_SIZE = 4200;
+const PLAYER_SPEED = 150;
+const ENEMY_SPEED = 64;
 
 class MainScene extends Phaser.Scene {
-  private readonly isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
   private player!: Phaser.GameObjects.Rectangle;
+
+  private playerDirection = new Phaser.Math.Vector2(1, 0);
+
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
-  private direction = new Phaser.Math.Vector2(1, 0);
-  private viewMode: ViewMode = 'third';
-  private resources: ResourceState = { wood: 220, stone: 160, food: 150, gold: 45 };
+
+  private resources: ResourceState = { wood: 130, stone: 90, food: 110 };
+
   private buildings: BuildingModel[] = [];
-  private enemies: EnemyModel[] = [];
-  private hudText!: Phaser.GameObjects.Text;
-  private waveText!: Phaser.GameObjects.Text;
-  private joystickBase!: Phaser.GameObjects.Arc;
-  private joystickKnob!: Phaser.GameObjects.Arc;
-  private joystick = new Phaser.Math.Vector2(0, 0);
-  private minimapDots: Phaser.GameObjects.Arc[] = [];
-  private interiorOverlay!: Phaser.GameObjects.Container;
-  private insideBuildingId: string | null = null;
+
+  private enemies: Phaser.GameObjects.Rectangle[] = [];
+
+  private safeZones: SafeZone[] = [];
+
+  private activeSafeZone: SafeZone | null = null;
+
+  private pausedByMenu = false;
+
   private waves = 0;
-  private pointerWasDown = false;
+
+  private waveText!: Phaser.GameObjects.Text;
+
+  private hudText!: Phaser.GameObjects.Text;
+
+  private menuContainer!: Phaser.GameObjects.Container;
+
+  private menuBg!: Phaser.GameObjects.Rectangle;
+
+  private mobileStickBase!: Phaser.GameObjects.Circle;
+
+  private mobileStickKnob!: Phaser.GameObjects.Circle;
+
+  private joystickVector = new Phaser.Math.Vector2(0, 0);
+
+  constructor() {
+    super('main');
+  }
 
   create(): void {
-    this.makeWorld();
+    this.createMapBackdrop();
     this.createPlayer();
-    this.createBuildings();
+    this.createInitialBuildings();
     this.createHud();
-    this.createMinimap();
-    this.createInteriorOverlay();
+    this.createUpgradeMenu();
     this.createJoystick();
-    this.bindHotkeys();
 
-    this.cameras.main.startFollow(this.player, true, 0.09, 0.09);
+    this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
     this.cameras.main.setBounds(0, 0, WORLD_SIZE, WORLD_SIZE);
-    this.applyViewMode();
 
-    this.time.addEvent({ delay: 6500, loop: true, callback: this.spawnWave, callbackScope: this });
-    this.time.addEvent({ delay: 1800, loop: true, callback: this.resourceTick, callbackScope: this });
+    this.time.addEvent({
+      delay: 6000,
+      loop: true,
+      callback: this.spawnWave,
+      callbackScope: this
+    });
+
+    this.time.addEvent({
+      delay: 10000,
+      loop: true,
+      callback: this.spawnSafeZone,
+      callbackScope: this
+    });
+
+    this.time.addEvent({
+      delay: 2200,
+      loop: true,
+      callback: this.resourceTick,
+      callbackScope: this
+    });
   }
 
-  update(_: number, delta: number): void {
+  update(time: number, delta: number): void {
     const dt = delta / 1000;
-    if (!this.insideBuildingId) {
+
+    if (!this.pausedByMenu) {
       this.updatePlayer(dt);
-      this.handlePlacement();
-      this.tryEnterBuilding();
+      this.updateEnemies(dt);
+      this.checkSafeZoneEntry();
+      this.handleBuildingPlacement();
     }
-    this.updateEnemies(dt);
-    this.updateMinimap();
+
+    const speedFactor = this.pausedByMenu ? 0.16 : 1;
+    this.updateEnemies(dt * speedFactor);
     this.updateHud();
-    this.pointerWasDown = this.input.activePointer.isDown;
+
+    if (time % 250 < 16) {
+      this.cleanupDeadEnemies();
+    }
   }
 
-  private makeWorld(): void {
-    this.add.rectangle(WORLD_SIZE / 2, WORLD_SIZE / 2, WORLD_SIZE, WORLD_SIZE, 0x1f2a22);
-    for (let i = 0; i < 600; i += 1) {
-      this.add.rectangle(Phaser.Math.Between(0, WORLD_SIZE), Phaser.Math.Between(0, WORLD_SIZE), Phaser.Math.Between(18, 56), Phaser.Math.Between(14, 34), Phaser.Math.Between(0, 1) ? 0x3b204f : 0x263f2a, 0.26);
+  private createMapBackdrop(): void {
+    this.add.rectangle(WORLD_SIZE / 2, WORLD_SIZE / 2, WORLD_SIZE, WORLD_SIZE, 0x263d26);
+
+    for (let i = 0; i < 240; i += 1) {
+      const x = Phaser.Math.Between(0, WORLD_SIZE);
+      const y = Phaser.Math.Between(0, WORLD_SIZE);
+      const color = Phaser.Math.Between(0, 1) ? 0x304830 : 0x2f3f25;
+      this.add.rectangle(x, y, Phaser.Math.Between(28, 60), Phaser.Math.Between(18, 40), color, 0.35);
     }
   }
 
   private createPlayer(): void {
-    this.player = this.add.rectangle(4500, 4500, 20, 20, 0xa8d9ff).setStrokeStyle(2, 0x1d4563);
-    this.keys = this.input.keyboard?.addKeys('W,A,S,D,E,Q,ONE,TWO') as Record<string, Phaser.Input.Keyboard.Key>;
+    this.player = this.add.rectangle(2100, 2100, 20, 20, 0x66ccff);
+    this.player.setStrokeStyle(2, 0x183f5a);
+    this.keys = this.input.keyboard?.addKeys('W,A,S,D') as Record<string, Phaser.Input.Keyboard.Key>;
   }
 
-  private createBuildings(): void {
-    this.addBuilding('keep', 4500, 4500, 500);
-    for (let i = 0; i < 24; i += 1) {
-      this.addBuilding('house', 4500 + Phaser.Math.Between(-1800, 1800), 4500 + Phaser.Math.Between(-1800, 1800), 230);
-    }
-    this.addBuilding('tower', 4700, 4400, 260);
-    this.addBuilding('workshop', 4350, 4620, 260);
-  }
-
-  private addBuilding(kind: BuildingKind, x: number, y: number, hp: number): void {
-    const color: Record<BuildingKind, number> = { keep: 0x9f87cc, house: 0x7663a3, tower: 0x4f8aa8, workshop: 0x5d6f86 };
-    const size = kind === 'keep' ? 42 : 26;
-    const sprite = this.add.rectangle(x, y, size, size, color[kind], 0.95).setStrokeStyle(2, 0x130d20);
-    this.buildings.push({
-      id: `${kind}-${Date.now()}-${Math.random()}`,
-      kind,
-      sprite,
-      hp,
-      maxHp: hp,
-      level: 1,
-      generationRate: kind === 'house' ? { food: 1 } : kind === 'workshop' ? { stone: 1, gold: 1 } : { wood: 1 },
-      attackLevel: kind === 'tower' ? 1 : 0,
-      defenseLevel: 1,
-      underAttackUntil: 0
-    });
+  private createInitialBuildings(): void {
+    this.addBuilding('keep', 2100, 2100, true);
+    this.addBuilding('farm', 2200, 2140);
+    this.addBuilding('tower', 1970, 2050);
   }
 
   private createHud(): void {
-    this.hudText = this.add.text(16, 12, '', { color: '#efe8ff', fontSize: '14px' }).setScrollFactor(0);
-    this.waveText = this.add.text(16, 34, 'Wave: 0', { color: '#d2f0ff', fontSize: '14px' }).setScrollFactor(0);
-    const help = this.isMobile
-      ? 'Mobile: joystick moves. Tap near hero to place tower. Tap house to enter.'
-      : 'Desktop: WASD move, 1=third person, 2=first person, E=enter/exit house.';
-    this.add.text(16, 56, help, { color: '#ffedbb', fontSize: '13px' }).setScrollFactor(0);
+    this.hudText = this.add.text(18, 14, '', {
+      color: '#f1f3c3',
+      fontSize: '16px'
+    });
+    this.hudText.setScrollFactor(0);
+
+    this.waveText = this.add.text(18, 42, 'Wave: 0', {
+      color: '#d2f0ff',
+      fontSize: '15px'
+    });
+    this.waveText.setScrollFactor(0);
+
+    const hint = this.add.text(18, 68, 'Click empty ground near you to place tower (wood 40, stone 25).', {
+      color: '#fff2b2',
+      fontSize: '13px',
+      wordWrap: { width: 440 }
+    });
+    hint.setScrollFactor(0);
   }
 
-  private createMinimap(): void {
-    this.add.rectangle(690, 98, 200, 170, 0x080b14, 0.72).setStrokeStyle(1, 0xc3d1ff, 0.6).setScrollFactor(0);
-  }
+  private createUpgradeMenu(): void {
+    this.menuBg = this.add.rectangle(400, 225, 460, 310, 0x121515, 0.92);
+    this.menuBg.setStrokeStyle(2, 0x7f9d70);
 
-  private createInteriorOverlay(): void {
-    const bg = this.add.rectangle(400, 225, 800, 450, 0x121318, 0.92);
-    const text = this.add.text(
-      120,
-      120,
-      `INSIDE HOUSE
+    const title = this.add.text(220, 95, 'Safe Zone Menu', { color: '#c6f4be', fontSize: '24px' });
+    const subtitle = this.add.text(210, 132, 'Repair, upgrade, and recruit while pressure slows.', {
+      color: '#e8edda',
+      fontSize: '13px'
+    });
 
-- Upgrade defense: Q (cost wood 25, stone 20)
-- Upgrade attack: E (cost wood 20, gold 15)
-- Exit: E near doorway
+    const repair = this.add.text(240, 172, '[R] Repair Keep (30 wood)', {
+      color: '#ffe6b2',
+      fontSize: '18px'
+    });
+    const upgrade = this.add.text(240, 206, '[U] Upgrade Keep (45 stone + 30 food)', {
+      color: '#d3f5ff',
+      fontSize: '18px'
+    });
+    const recruit = this.add.text(240, 240, '[B] Build Barracks (50 wood + 40 stone)', {
+      color: '#f8d5ff',
+      fontSize: '18px'
+    });
+    const close = this.add.text(240, 280, '[ESC] Leave Safe Zone Menu', {
+      color: '#bcccae',
+      fontSize: '17px'
+    });
 
-Houses under attack flash red on minimap.`,
-      { color: '#e8efff', fontSize: '24px' }
-    );
-    this.interiorOverlay = this.add.container(0, 0, [bg, text]).setVisible(false).setScrollFactor(0).setDepth(100);
+    this.menuContainer = this.add.container(0, 0, [this.menuBg, title, subtitle, repair, upgrade, recruit, close]);
+    this.menuContainer.setScrollFactor(0);
+    this.menuContainer.setVisible(false);
+
+    this.input.keyboard?.on('keydown-R', () => {
+      if (!this.pausedByMenu) return;
+      const keep = this.getKeep();
+      if (keep && this.resources.wood >= keep.repairCost && keep.hp < keep.maxHp) {
+        this.resources.wood -= keep.repairCost;
+        keep.hp = Math.min(keep.maxHp, keep.hp + 65);
+      }
+    });
+
+    this.input.keyboard?.on('keydown-U', () => {
+      if (!this.pausedByMenu) return;
+      const keep = this.getKeep();
+      if (keep && this.resources.stone >= 45 && this.resources.food >= 30) {
+        this.resources.stone -= 45;
+        this.resources.food -= 30;
+        keep.level += 1;
+        keep.maxHp += 50;
+        keep.hp = keep.maxHp;
+        keep.repairCost += 5;
+        keep.sprite.setFillStyle(0xcad489 + keep.level * 0x070300);
+      }
+    });
+
+    this.input.keyboard?.on('keydown-B', () => {
+      if (!this.pausedByMenu) return;
+      if (this.resources.wood < 50 || this.resources.stone < 40) return;
+      this.resources.wood -= 50;
+      this.resources.stone -= 40;
+      this.addBuilding(
+        'barracks',
+        this.player.x + Phaser.Math.Between(-130, 130),
+        this.player.y + Phaser.Math.Between(-130, 130)
+      );
+    });
+
+    this.input.keyboard?.on('keydown-ESC', () => {
+      this.closeMenu();
+    });
   }
 
   private createJoystick(): void {
-    this.joystickBase = this.add.circle(86, 368, 42, 0x263044, 0.5).setScrollFactor(0).setDepth(20);
-    this.joystickKnob = this.add.circle(86, 368, 17, 0x9ed8ff, 0.85).setScrollFactor(0).setDepth(21);
-    if (!this.isMobile) {
-      this.joystickBase.setVisible(false);
-      this.joystickKnob.setVisible(false);
-      return;
-    }
-    this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
-      if (!p.isDown) return;
-      const dx = p.x - 86;
-      const dy = p.y - 368;
-      const len = Math.min(34, Math.hypot(dx, dy));
-      const a = Math.atan2(dy, dx);
-      this.joystickKnob.setPosition(86 + Math.cos(a) * len, 368 + Math.sin(a) * len);
-      this.joystick.set(Math.cos(a) * (len / 34), Math.sin(a) * (len / 34));
+    this.mobileStickBase = this.add.circle(88, 370, 44, 0x202734, 0.45);
+    this.mobileStickKnob = this.add.circle(88, 370, 18, 0x8ec8ff, 0.8);
+    this.mobileStickBase.setScrollFactor(0).setDepth(20);
+    this.mobileStickKnob.setScrollFactor(0).setDepth(21);
+
+    this.mobileStickBase.setInteractive();
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (!pointer.isDown) return;
+      const dx = pointer.x - 88;
+      const dy = pointer.y - 370;
+      const length = Math.min(36, Math.hypot(dx, dy));
+      const angle = Math.atan2(dy, dx);
+      this.mobileStickKnob.x = 88 + Math.cos(angle) * length;
+      this.mobileStickKnob.y = 370 + Math.sin(angle) * length;
+      this.joystickVector.set(Math.cos(angle) * (length / 36), Math.sin(angle) * (length / 36));
     });
+
     this.input.on('pointerup', () => {
-      this.joystickKnob.setPosition(86, 368);
-      this.joystick.set(0, 0);
+      this.mobileStickKnob.setPosition(88, 370);
+      this.joystickVector.set(0, 0);
     });
-  }
-
-  private bindHotkeys(): void {
-    this.input.keyboard?.on('keydown-ONE', () => {
-      this.viewMode = 'third';
-      this.applyViewMode();
-    });
-    this.input.keyboard?.on('keydown-TWO', () => {
-      this.viewMode = 'first';
-      this.applyViewMode();
-    });
-    this.input.keyboard?.on('keydown-E', () => {
-      if (this.insideBuildingId) this.exitHouse();
-    });
-    this.input.keyboard?.on('keydown-Q', () => {
-      if (!this.insideBuildingId) return;
-      const b = this.buildings.find((x) => x.id === this.insideBuildingId);
-      if (!b || this.resources.wood < 25 || this.resources.stone < 20) return;
-      this.resources.wood -= 25;
-      this.resources.stone -= 20;
-      b.defenseLevel += 1;
-      b.maxHp += 40;
-      b.hp = Math.min(b.maxHp, b.hp + 40);
-    });
-    this.input.keyboard?.on('keydown-E', () => {
-      if (!this.insideBuildingId) return;
-      const b = this.buildings.find((x) => x.id === this.insideBuildingId);
-      if (!b || this.resources.wood < 20 || this.resources.gold < 15) return;
-      this.resources.wood -= 20;
-      this.resources.gold -= 15;
-      b.attackLevel += 1;
-    });
-  }
-
-  private applyViewMode(): void {
-    this.cameras.main.setZoom(this.viewMode === 'first' ? 1.35 : 0.78);
   }
 
   private updatePlayer(dt: number): void {
@@ -208,142 +268,256 @@ Houses under attack flash red on minimap.`,
     if (this.keys.S.isDown) input.y += 1;
     if (this.keys.A.isDown) input.x -= 1;
     if (this.keys.D.isDown) input.x += 1;
-    if (input.lengthSq() > 0) this.direction.copy(input.normalize());
-    else if (this.isMobile && this.joystick.lengthSq() > 0.02) this.direction.copy(this.joystick.clone().normalize());
-    const v = this.direction.clone().scale(PLAYER_SPEED * dt);
-    this.player.x = Phaser.Math.Clamp(this.player.x + v.x, 10, WORLD_SIZE - 10);
-    this.player.y = Phaser.Math.Clamp(this.player.y + v.y, 10, WORLD_SIZE - 10);
+
+    if (input.lengthSq() > 0.02) {
+      input.normalize();
+      this.playerDirection.copy(input);
+    } else if (this.joystickVector.lengthSq() > 0.03) {
+      this.playerDirection.copy(this.joystickVector.clone().normalize());
+    }
+
+    const velocity = this.playerDirection.clone().scale(PLAYER_SPEED * dt);
+    const nextX = Phaser.Math.Clamp(this.player.x + velocity.x, 10, WORLD_SIZE - 10);
+    const nextY = Phaser.Math.Clamp(this.player.y + velocity.y, 10, WORLD_SIZE - 10);
+
+    const blocked = this.buildings.some((building) => {
+      const distance = Phaser.Math.Distance.Between(nextX, nextY, building.sprite.x, building.sprite.y);
+      return distance < 20;
+    });
+
+    if (!blocked) {
+      this.player.setPosition(nextX, nextY);
+    }
   }
 
   private spawnWave(): void {
     this.waves += 1;
     this.waveText.setText(`Wave: ${this.waves}`);
-    const count = 6 + this.waves * 2;
-    for (let i = 0; i < count; i += 1) {
+
+    const enemiesThisWave = 3 + Math.floor(this.waves * 1.5);
+    for (let i = 0; i < enemiesThisWave; i += 1) {
       const edge = Phaser.Math.Between(0, 3);
-      const x = edge === 0 ? 0 : edge === 1 ? WORLD_SIZE : Phaser.Math.Between(0, WORLD_SIZE);
-      const y = edge === 2 ? 0 : edge === 3 ? WORLD_SIZE : Phaser.Math.Between(0, WORLD_SIZE);
-      const sprite = this.add.rectangle(x, y, 14, 14, 0xd34f77).setStrokeStyle(1, 0x4f1330);
-      this.enemies.push({ sprite, hp: 40 + this.waves * 3, speed: 56 + this.waves, damage: 8 + this.waves * 0.5 });
+      let x = 0;
+      let y = 0;
+      if (edge === 0) {
+        x = 0;
+        y = Phaser.Math.Between(0, WORLD_SIZE);
+      } else if (edge === 1) {
+        x = WORLD_SIZE;
+        y = Phaser.Math.Between(0, WORLD_SIZE);
+      } else if (edge === 2) {
+        x = Phaser.Math.Between(0, WORLD_SIZE);
+        y = 0;
+      } else {
+        x = Phaser.Math.Between(0, WORLD_SIZE);
+        y = WORLD_SIZE;
+      }
+
+      const enemy = this.add.rectangle(x, y, 16, 16, 0x7f1c1c);
+      enemy.setStrokeStyle(1, 0xd26f6f);
+      this.enemies.push(enemy);
     }
   }
 
   private updateEnemies(dt: number): void {
-    const now = this.time.now;
     this.enemies.forEach((enemy) => {
-      const target = this.closestBuilding(enemy.sprite.x, enemy.sprite.y);
-      const tx = target?.sprite.x ?? this.player.x;
-      const ty = target?.sprite.y ?? this.player.y;
-      const a = Phaser.Math.Angle.Between(enemy.sprite.x, enemy.sprite.y, tx, ty);
-      enemy.sprite.x += Math.cos(a) * enemy.speed * dt;
-      enemy.sprite.y += Math.sin(a) * enemy.speed * dt;
-      if (target && Phaser.Math.Distance.Between(enemy.sprite.x, enemy.sprite.y, target.sprite.x, target.sprite.y) < 16) {
-        target.underAttackUntil = now + 900;
-        target.hp -= enemy.damage * dt / target.defenseLevel;
+      const targetBuilding = this.getClosestLivingBuilding(enemy.x, enemy.y);
+      const target = targetBuilding?.sprite ?? this.player;
+      const angle = Phaser.Math.Angle.Between(enemy.x, enemy.y, target.x, target.y);
+
+      enemy.x += Math.cos(angle) * ENEMY_SPEED * dt;
+      enemy.y += Math.sin(angle) * ENEMY_SPEED * dt;
+
+      if (targetBuilding && Phaser.Math.Distance.Between(enemy.x, enemy.y, target.x, target.y) < 15) {
+        targetBuilding.hp -= 7 * dt * (1 + this.waves * 0.06);
+      } else if (Phaser.Math.Distance.Between(enemy.x, enemy.y, this.player.x, this.player.y) < 13) {
+        this.resources.food = Math.max(0, this.resources.food - 5 * dt);
       }
-      if (Phaser.Math.Distance.Between(enemy.sprite.x, enemy.sprite.y, this.player.x, this.player.y) < 24) enemy.hp -= 58 * dt;
+
+      const strikeRange = Phaser.Math.Distance.Between(enemy.x, enemy.y, this.player.x, this.player.y) < 24;
+      if (strikeRange) {
+        enemy.destroy();
+        this.resources.wood += 7;
+        this.resources.stone += 3;
+      }
     });
 
-    this.buildings.forEach((b) => {
-      if (b.kind !== 'tower' || b.attackLevel < 1) return;
-      const foe = this.enemies.find((e) => Phaser.Math.Distance.Between(e.sprite.x, e.sprite.y, b.sprite.x, b.sprite.y) < 180);
-      if (!foe) return;
-      foe.hp -= (8 + b.attackLevel * 4) * dt;
-    });
-
-    this.enemies = this.enemies.filter((e) => {
-      if (e.hp > 0) return true;
-      e.sprite.destroy();
-      this.resources.wood += 2;
-      this.resources.food += 1;
-      return false;
-    });
-
-    this.buildings = this.buildings.filter((b) => {
-      if (b.hp > 0) return true;
-      b.sprite.destroy();
-      return b.kind === 'keep' ? (this.gameOver(), false) : false;
+    this.buildings = this.buildings.filter((building) => {
+      if (building.hp <= 0) {
+        building.sprite.destroy();
+        if (building.kind === 'keep') {
+          this.scene.pause();
+          const lost = this.add
+            .text(this.cameras.main.midPoint.x - 160, this.cameras.main.midPoint.y, 'Your keep fell. Run ended.', {
+              fontSize: '34px',
+              color: '#ffbbbb'
+            })
+            .setScrollFactor(0)
+            .setDepth(40);
+          lost.setStroke('#230f0f', 3);
+        }
+        return false;
+      }
+      return true;
     });
   }
 
-  private tryEnterBuilding(): void {
-    if (!Phaser.Input.Keyboard.JustDown(this.keys.E)) return;
-    const house = this.buildings.find((b) => b.kind === 'house' && Phaser.Math.Distance.Between(b.sprite.x, b.sprite.y, this.player.x, this.player.y) < 40);
-    if (!house) return;
-    this.insideBuildingId = house.id;
-    this.interiorOverlay.setVisible(true);
-  }
-
-  private exitHouse(): void {
-    this.insideBuildingId = null;
-    this.interiorOverlay.setVisible(false);
-  }
-
-  private handlePlacement(): void {
-    if (!(this.input.activePointer.isDown && !this.pointerWasDown)) return;
-    const pos = this.input.activePointer.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
-    if (Phaser.Math.Distance.Between(pos.x, pos.y, this.player.x, this.player.y) > 220) return;
-    if (this.resources.wood < 50 || this.resources.stone < 35) return;
-    this.resources.wood -= 50;
-    this.resources.stone -= 35;
-    this.addBuilding('tower', pos.x, pos.y, 230);
-  }
-
-  private updateMinimap(): void {
-    this.minimapDots.forEach((d) => d.destroy());
-    this.minimapDots = [];
-    const mapX = 600;
-    const mapY = 20;
-    const w = 180;
-    const h = 150;
-    const now = this.time.now;
-    this.buildings.forEach((b) => {
-      const x = mapX + (b.sprite.x / WORLD_SIZE) * w;
-      const y = mapY + (b.sprite.y / WORLD_SIZE) * h;
-      const red = b.underAttackUntil > now;
-      this.minimapDots.push(this.add.circle(x, y, b.kind === 'keep' ? 4 : 2.5, red ? 0xff2d2d : 0x8db8ff, 0.95).setScrollFactor(0));
+  private getClosestLivingBuilding(x: number, y: number): BuildingModel | null {
+    let closest: BuildingModel | null = null;
+    let best = Number.POSITIVE_INFINITY;
+    this.buildings.forEach((building) => {
+      const d = Phaser.Math.Distance.Between(x, y, building.sprite.x, building.sprite.y);
+      if (d < best) {
+        best = d;
+        closest = building;
+      }
     });
-    this.minimapDots.push(this.add.circle(mapX + (this.player.x / WORLD_SIZE) * w, mapY + (this.player.y / WORLD_SIZE) * h, 3, 0x74ff98, 1).setScrollFactor(0));
+    return closest;
   }
 
   private resourceTick(): void {
-    this.buildings.forEach((b) => {
-      this.resources.wood += b.generationRate.wood ?? 0;
-      this.resources.stone += b.generationRate.stone ?? 0;
-      this.resources.food += b.generationRate.food ?? 0;
-      this.resources.gold += b.generationRate.gold ?? 0;
+    this.buildings.forEach((building) => {
+      const gen = building.generationRate;
+      this.resources.wood += gen.wood ?? 0;
+      this.resources.stone += gen.stone ?? 0;
+      this.resources.food += gen.food ?? 0;
     });
+  }
+
+  private addBuilding(kind: BuildingKind, x: number, y: number, isCentral = false): void {
+    const palette: Record<BuildingKind, number> = {
+      keep: 0xbcb075,
+      farm: 0x70a14b,
+      tower: 0x9b8d89,
+      barracks: 0x956d5f
+    };
+    const size = kind === 'keep' ? 38 : 26;
+
+    const sprite = this.add.rectangle(
+      Phaser.Math.Clamp(x, 28, WORLD_SIZE - 28),
+      Phaser.Math.Clamp(y, 28, WORLD_SIZE - 28),
+      size,
+      size,
+      palette[kind]
+    );
+    sprite.setStrokeStyle(2, 0x101010);
+
+    const model: BuildingModel = {
+      id: `${kind}-${Date.now()}-${Math.floor(Math.random() * 9999)}`,
+      kind,
+      sprite,
+      hp: isCentral ? 380 : 180,
+      maxHp: isCentral ? 380 : 180,
+      level: 1,
+      repairCost: isCentral ? 30 : 20,
+      generationRate:
+        kind === 'farm'
+          ? { food: 2 }
+          : kind === 'tower'
+            ? { stone: 1 }
+            : kind === 'barracks'
+              ? { wood: 1, food: 1 }
+              : { wood: 2, stone: 1 }
+    };
+
+    this.buildings.push(model);
+  }
+
+  private spawnSafeZone(): void {
+    const zone: SafeZone = {
+      id: `zone-${Date.now()}`,
+      x: Phaser.Math.Between(100, WORLD_SIZE - 100),
+      y: Phaser.Math.Between(100, WORLD_SIZE - 100),
+      radius: Phaser.Math.Between(70, 115),
+      circle: this.add.circle(0, 0, 20, 0x80ca91, 0.15)
+    };
+
+    zone.circle.destroy();
+    zone.circle = this.add.circle(zone.x, zone.y, zone.radius, 0x80ca91, 0.18);
+    zone.circle.setStrokeStyle(2, 0x93f0a8, 0.45);
+
+    this.safeZones.push(zone);
+    if (this.safeZones.length > 4) {
+      const old = this.safeZones.shift();
+      old?.circle.destroy();
+    }
+  }
+
+  private checkSafeZoneEntry(): void {
+    if (this.pausedByMenu) return;
+
+    const matched = this.safeZones.find(
+      (zone) => Phaser.Math.Distance.Between(this.player.x, this.player.y, zone.x, zone.y) <= zone.radius
+    );
+
+    if (matched && this.activeSafeZone?.id !== matched.id) {
+      this.activeSafeZone = matched;
+      this.openMenu();
+    }
+  }
+
+  private openMenu(): void {
+    this.pausedByMenu = true;
+    this.menuContainer.setVisible(true);
+  }
+
+  private closeMenu(): void {
+    this.pausedByMenu = false;
+    this.activeSafeZone = null;
+    this.menuContainer.setVisible(false);
+  }
+
+  private handleBuildingPlacement(): void {
+    if (!this.input.activePointer.justDown) return;
+    const pointer = this.input.activePointer;
+    const world = pointer.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+
+    const farFromPlayer = Phaser.Math.Distance.Between(this.player.x, this.player.y, world.x, world.y) > 210;
+    if (farFromPlayer) return;
+
+    if (this.resources.wood < 40 || this.resources.stone < 25) return;
+
+    const overlapping = this.buildings.some(
+      (building) => Phaser.Math.Distance.Between(building.sprite.x, building.sprite.y, world.x, world.y) < 44
+    );
+
+    if (!overlapping) {
+      this.resources.wood -= 40;
+      this.resources.stone -= 25;
+      this.addBuilding('tower', world.x, world.y);
+    }
   }
 
   private updateHud(): void {
-    this.hudText.setText(`W ${this.resources.wood.toFixed(0)} S ${this.resources.stone.toFixed(0)} F ${this.resources.food.toFixed(0)} G ${this.resources.gold.toFixed(0)}  Houses ${this.buildings.filter((b) => b.kind === 'house').length}  View ${this.viewMode}`);
+    const keep = this.getKeep();
+    const keepHp = keep ? `${Math.max(0, keep.hp).toFixed(0)}/${keep.maxHp}` : '0';
+    this.hudText.setText(
+      `Wood ${this.resources.wood.toFixed(0)}   Stone ${this.resources.stone.toFixed(0)}   Food ${this.resources.food.toFixed(0)}   Keep HP ${keepHp}`
+    );
   }
 
-  private closestBuilding(x: number, y: number): BuildingModel | undefined {
-    let best: BuildingModel | undefined;
-    let dist = Number.POSITIVE_INFINITY;
-    this.buildings.forEach((b) => {
-      const d = Phaser.Math.Distance.Between(x, y, b.sprite.x, b.sprite.y);
-      if (d < dist) {
-        dist = d;
-        best = b;
-      }
-    });
-    return best;
+  private getKeep(): BuildingModel | undefined {
+    return this.buildings.find((b) => b.kind === 'keep');
   }
 
-  private gameOver(): void {
-    this.scene.pause();
-    this.add.text(this.cameras.main.midPoint.x - 170, this.cameras.main.midPoint.y, 'Keep destroyed. Campaign ended.', { fontSize: '32px', color: '#ffb1b1' }).setScrollFactor(0).setDepth(100);
+  private cleanupDeadEnemies(): void {
+    this.enemies = this.enemies.filter((enemy) => enemy.active);
   }
 }
 
-new Phaser.Game({
+const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'app',
-  backgroundColor: '#1a1c28',
-  scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 800, height: 450 },
+  backgroundColor: '#1e221a',
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+    width: 800,
+    height: 450
+  },
   scene: [MainScene]
-});
+};
+
+new Phaser.Game(config);
 
 // Copyright and licensed usage to Joe Wease, Founder and CEO of REALE.
